@@ -1,10 +1,10 @@
 extern crate adler32;
 
 use adler32::RollingAdler32;
-use std::env;
-use std::error::Error;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Write};
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error + 'static>>;
 
 const BUFFER_SIZE: usize = 0x1000;
 const KEY_SIZE: usize = 0x400;
@@ -74,8 +74,60 @@ const MASTER_KEY: [u8; KEY_SIZE] = [
     0xAD, 0xE1, 0x77, 0xBC, 0x54, 0x41, 0x12, 0x2A, 0x00, 0xC1, 0x82, 0xFD, 0xFC, 0x25, 0x96, 0x6A,
     0x6F, 0x18, 0x79, 0x39, 0xDE, 0x36, 0xBA, 0xD3, 0x19, 0x9A, 0x65, 0xA7, 0x09, 0xFA, 0x0F, 0xC0,
 ];
+const U32_SIZE: usize = std::mem::size_of::<u32>();
 
-fn get_output_filename(input_filename: &str) -> Result<String, Box<dyn Error>> {
+fn get_decrypted_buffer(file: &File) -> Result<Vec<u8>> {
+    let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
+    let mut buffer = reader.fill_buf()?;
+    let mut buffer_len = buffer.len();
+    if buffer_len < U32_SIZE {
+        return Err("Couldn't determine the expected Adler32".into());
+    }
+
+    let mut current_adler32 = RollingAdler32::new();
+    let expected_adler32 = {
+        let mut adler32_buffer = [0; U32_SIZE];
+        adler32_buffer.copy_from_slice(&buffer[..U32_SIZE]);
+        u32::from_le_bytes(adler32_buffer)
+    };
+    let mut out_buffer = Vec::with_capacity(buffer.len() - U32_SIZE);
+    let mut data_start = U32_SIZE;
+    let mut key_offset = expected_adler32 as usize % KEY_SIZE;
+
+    loop {
+        for byte in &buffer[data_start..] {
+            let out_byte = (byte ^ MASTER_KEY[key_offset]).reverse_bits();
+            current_adler32.update(out_byte);
+            out_buffer.push(out_byte);
+            key_offset += 1;
+            key_offset %= KEY_SIZE;
+        }
+        reader.consume(buffer_len);
+        if buffer_len < BUFFER_SIZE {
+            break;
+        }
+        buffer = reader.fill_buf()?;
+        buffer_len = buffer.len();
+        if buffer_len == 0 {
+            break;
+        }
+        data_start = 0;
+        out_buffer.reserve(buffer_len);
+    }
+
+    if current_adler32.hash() == expected_adler32 {
+        Ok(out_buffer)
+    } else {
+        Err(format!(
+            "Adler32 mismatch: Expected {:#010X}, got {:#010X}",
+            expected_adler32,
+            current_adler32.hash()
+        )
+        .into())
+    }
+}
+
+fn get_output_filename(input_filename: &str) -> Result<String> {
     let filename = match input_filename.rsplit_once('.') {
         Some((filename, extension)) => {
             let extension = {
@@ -101,54 +153,20 @@ fn get_output_filename(input_filename: &str) -> Result<String, Box<dyn Error>> {
     }
 }
 
-fn decrypt(input_filename: &str) -> Result<(), Box<dyn Error>> {
+fn decrypt(input_filename: &str) -> Result<()> {
     let output_filename = get_output_filename(&input_filename)?;
-    let mut input = File::open(input_filename)?;
-    let mut current_adler32 = RollingAdler32::new();
-    let expected_adler32 = {
-        let mut buffer = [0; 4];
-        input.read_exact(&mut buffer)?;
-        u32::from_le_bytes(buffer)
-    };
-    let mut read_buffer = Vec::from([0; BUFFER_SIZE]);
-    let mut out_buffer = Vec::with_capacity(BUFFER_SIZE);
-    let mut key_offset = expected_adler32 as usize % KEY_SIZE;
-    loop {
-        let data_end = input.read(&mut read_buffer[..])?;
-        if data_end == 0 {
-            break;
-        }
-        for byte in &mut read_buffer[..data_end] {
-            *byte ^= MASTER_KEY[key_offset];
-            *byte = byte.reverse_bits();
-            key_offset = (key_offset + 1) % KEY_SIZE;
-        }
-        out_buffer.reserve(data_end);
-        out_buffer.extend_from_slice(&mut read_buffer[..data_end]);
-        current_adler32.update_buffer(&read_buffer[..data_end]);
-        if data_end < BUFFER_SIZE {
-            break;
-        }
-    }
-    if current_adler32.hash() == expected_adler32 {
-        let mut output = File::create(output_filename)?;
-        output.write_all(&out_buffer)?;
-        Ok(())
-    } else {
-        Err(format!(
-            "Adler32 mismatch: Expected {:#010X}, got {:#010X}",
-            expected_adler32,
-            current_adler32.hash()
-        )
-        .into())
-    }
+    let input_file = File::open(input_filename)?;
+    let decrypted_buffer = get_decrypted_buffer(&input_file)?;
+    let mut output = File::create(output_filename)?;
+    output.write_all(&decrypted_buffer)?;
+    Ok(())
 }
 
 fn main() {
     let mut show_help = true;
     let mut has_errors = false;
 
-    for file in env::args().skip(1) {
+    for file in std::env::args().skip(1) {
         decrypt(&file).unwrap_or_else(|err| {
             has_errors = true;
             eprintln!("Error decrypting {}: {}", file, err);
