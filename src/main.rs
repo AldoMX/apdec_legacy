@@ -64,34 +64,20 @@ fn get_decrypted_buffer(file: &File, key: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
-fn get_output_filename(input_filename: &str) -> Result<String> {
-    let filename = match input_filename.rsplit_once('.') {
-        Some((filename, extension)) => {
-            let extension = {
-                let lc_extension = extension.to_lowercase();
-                if lc_extension == "aud" {
-                    Some("mp3")
-                } else if lc_extension == "pnz" {
-                    Some("png")
-                } else {
-                    None
-                }
-            };
-            match extension {
-                Some(extension) => Some(format!("{}.{}", filename, extension)),
-                _ => None,
-            }
-        }
+fn get_output_filename(input_filename: &str) -> Option<String> {
+    match input_filename.rsplit_once('.') {
+        Some((filename, extension)) => match extension.to_lowercase().as_str() {
+            "aud" => Some([filename, ".mp3"].concat()),
+            "pnz" => Some([filename, ".png"].concat()),
+            _ => None,
+        },
         _ => None,
-    };
-    match filename {
-        Some(filename) => Ok(filename),
-        _ => Err("Couldn't determine the output filename".into()),
     }
 }
 
 fn decrypt(input_filename: &str) -> Result<()> {
-    let output_filename = get_output_filename(&input_filename)?;
+    let output_filename =
+        get_output_filename(&input_filename).ok_or("Couldn't determine the output filename")?;
     let input_file = File::open(input_filename)?;
     let decrypted_buffer = get_decrypted_buffer(&input_file, &KEY_PIU_EXTRA)?;
     let mut output = File::create(output_filename)?;
