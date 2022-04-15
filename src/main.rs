@@ -1,6 +1,8 @@
 extern crate adler32;
+extern crate rayon;
 
 use adler32::RollingAdler32;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 
@@ -86,22 +88,26 @@ fn decrypt(input_filename: &str) -> Result<()> {
 }
 
 fn main() {
-    let mut show_help = true;
-    let mut has_errors = false;
-
-    for file in std::env::args().skip(1) {
-        decrypt(&file).unwrap_or_else(|err| {
-            has_errors = true;
-            eprintln!("Error decrypting {}: {}", file, err);
-        });
-        show_help = false;
-    }
-
-    if show_help {
+    let files: Vec<String> = std::env::args().skip(1).collect();
+    if files.len() == 0 {
         eprintln!("Usage: apdec_legacy FILE1.AUD [FILE2.PNZ] [FILE3.AUD] [...]");
+        std::process::exit(1);
     }
 
-    if show_help || has_errors {
+    let num_errors = files
+        .into_par_iter()
+        .filter(|file| {
+            if let Err(error) = decrypt(&file) {
+                eprintln!("Error decrypting {}: {}", file, error);
+                true
+            } else {
+                eprintln!("Success decrypting {}", file);
+                false
+            }
+        })
+        .count();
+
+    if num_errors > 0 {
         std::process::exit(1);
     }
 }
